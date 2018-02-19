@@ -1,32 +1,20 @@
-This version of perfTest is specifically to test the burst mode. The changes are made to perftest 2.0. Few additional parameters are added to support burstMode and those are described below:
+# RTI Perftest (2.3) [<img alt="License" src="https://img.shields.io/badge/License-EPL%201.0-red.svg" align="right" />](https://opensource.org/licenses/EPL-1.0)
 
--burstMode
-Use burst mode. Send burst of ‘burstSamples’ and then wait for ‘burstDelay’ seconds.
-Default: false
-Range: None
+RTI Perftest is a command-line application that measures the Latency and Throughput of very configurable scenarios that use RTI Connext DDS middleware to send messages.
 
+**Download** the latest stable releases [here](https://github.com/rticommunity/rtiperftest/releases).
 
--burstSamples <no_of_samples>
-Number of samples to send in each burst.
-Default: 10 samples.
-Range: 1 - 100
+Find all the information about RTI Perftest in the following documents:
 
--burstDelay <ms>
-Delay in ms in-between each burst.
-Default: 10 ms.
-Range: 1 - 100000 seconds
-
-Other relavent parameters: dataLen, executionTime
-
-Example:
-Publisher command: 
-./perftest_publisher -burstMode -burstSamples 100 -burstDelay 100 -latencyTest -executionTime 180 -dataLen 400000  -pub
-
-Description: Enable burstMode. Send 100 samples in a burst then wait 100 ms and send burst again. Continue this cycle for 180 (executionTime) seconds total. Each sample length is 400000 including overhead bytes.
-
-Subscriber command: 
-./perftest_publisher -dataLen 400000 -sub
-
-Description: Subscriber side. No burstMode specific parameters needed.
-
-Note: The perftest should be executed from top directory where QoS file is located.
+1.  [Introduction](srcDoc/introduction.rst)
+2.  [Download Instructions](srcDoc/download.rst)
+3.  [Compilation](srcDoc/compilation.rst)
+4.  [Execution](srcDoc/execution.rst)
+5.  [Command-Line Parameters](srcDoc/command_line_parameters.rst)
+6.  [Use-Cases And Examples](srcDoc/examples.rst)  
+    6.1 [Example Command-Lines for Running the Performance Test](srcDoc/examples.rst)  
+    6.2 [Use-Cases](srcDoc/examples.rst)  
+        6.2.1 [Large Samples](srcDoc/examples.rst#large-samples)  
+        6.2.2 [Content-Filtered Topics](srcDoc/examples.rst#content-filtered-topics)  
+        6.2.3 [RTI Routing-Service](srcDoc/examples.rst#rti-routing-service)  
+7.  [Release Notes](srcDoc/release_notes.rst)
