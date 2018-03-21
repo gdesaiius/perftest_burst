@@ -3,6 +3,11 @@
  * Subject to Eclipse Public License v1.0; see LICENSE.md for details.
  */
 
+#include <ctime>
+#include <assert.h>
+#include <signal.h>
+#include <sys/time.h>
+
 #include "RTIDDSImpl.h"
 #include "perftest_cpp.h"
 #include "CpuMonitor.h"
@@ -22,6 +27,7 @@ int  perftest_cpp::_SubID = 0;
 int  perftest_cpp::_PubID = 0;
 bool perftest_cpp::_PrintIntervals = true;
 bool perftest_cpp::_showCpu = false;
+unsigned long throughput_seq_num = 0;
 
 /* Clock related variables */
 struct RTIClock* perftest_cpp::_Clock = RTIHighResolutionClock_new();
@@ -52,6 +58,7 @@ HANDLE perftest_cpp::_hTimerQueue = NULL;
 HANDLE perftest_cpp::_hTimer = NULL;
 #endif
 
+void * pt2Object;
 /*********************************************************
  * Main
  */
@@ -61,6 +68,8 @@ int main(int argc, char *argv[])
 
     try {
         perftest_cpp app;
+        pt2Object = (void*) &app;
+
         return app.Run(argc, argv);
     } catch (const std::exception &ex) {
         // This will catch DDS exceptions
@@ -94,6 +103,12 @@ int perftest_cpp::Run(int argc, char *argv[])
     {
         return -1;
     }
+
+    printf("Command Entered: ");
+    for(int i = 0; i < argc; i++)
+        printf("%s ", argv[i]);
+    printf("\n");
+
     if (_useUnbounded == 0) { //unbounded is not set
         if (_isKeyed){
             fprintf(stderr, "Using Keyed Data.\n");
@@ -217,10 +232,11 @@ perftest_cpp::perftest_cpp()
     _isKeyed = false;
     _useUnbounded = 0;
     _executionTime = 0;
-    burstDelay = 100;
-    burstSamples = 10;
+    _burstDelay = 100;
+    _burstSamples = 10;
     _displayWriterStats = false;
     _pubRateMethodSpin = true;
+    _timerDelay = false;
     _useCft = false;
 
 #ifdef RTI_WIN32
@@ -318,13 +334,9 @@ bool perftest_cpp::ParseConfig(int argc, char *argv[])
         "\t                          Specify 2 parameters: <start> and <end> to receive samples with a key in that range.\n"
         "\t                          Specify only 1 parameter to receive samples with that exact key.\n"
         "\t                          Default: Not set\n"
-        "\t-burstMode              - Enable burst mode.\n"
-        "\t                          In burstMode, perfTest sends 'burstSamples' number of samples continuously\n"
-        "\t                          followed by delay specified in delay parameters.\n"
-        "\t-burstSamples              - Enable burst mode.\n"
-        "\t                          In burstMode, perfTest sends number of samples specified in pubRate continuously\n"
-        "\t                          followed by delay specified in delay parameters.\n"
-        "\t-burstDelay             - Delay in-between bursts in ms.\n"
+        "\t-burstSamples             Number of samples to send in a burst. If specified the burst mode is used.\n"
+        "\t-burstDelay<ms>:<delayMethod> - Delay in-between bursts in ms. If specified the burst mode is used. \n"
+        "\t                          The delayMethod specifies if timer, spin or sleep method to use for delay. The timer method is default\n"
         "\t-monitor                - Enable monitor.\n";
 
     if (argc < 1)
@@ -757,19 +769,6 @@ bool perftest_cpp::ParseConfig(int argc, char *argv[])
 
             _MessagingArgc++;
         }
-        else if (IS_OPTION(argv[i], "-burstMode"))
-        {
-            IsBurstMode = true;
-
-            _MessagingArgv[_MessagingArgc] = DDS_String_dup(argv[i]);
-
-            if (_MessagingArgv[_MessagingArgc] == NULL) {
-                fprintf(stderr, "Problem allocating memory\n");
-                return false;
-            }
-
-            _MessagingArgc++;
-        }
         else if (IS_OPTION(argv[i], "-monitor"))
         {
             IsMonitor = true;
@@ -787,15 +786,39 @@ bool perftest_cpp::ParseConfig(int argc, char *argv[])
         {
             if ((i == (argc-1)) || *argv[++i] == '-')
             {
-                fprintf(stderr, "Missing <seconds> after -delay\n");
+                fprintf(stderr, "Missing <ms> after -burstDelay\n");
                 return false;
             }
-            burstDelay = (unsigned int) strtol(argv[i], NULL, 10);
-            if (burstDelay < 1 || burstDelay > 100000)
+
+            if (strchr(argv[i],':') != NULL) { // In the case that there are 2 parameter
+                if (sscanf(argv[i],"%lu:%*s",&_burstDelay) != 1) {
+                    fprintf(stderr, "-burstDelay value must have the format <ms>:<method>\n");
+                    return false;
+                }
+                if (strstr(argv[i], "spin") != NULL) {
+                    printf("-burstDelay method: spin.\n");
+                    _timerDelay = false;
+                } else if (strstr(argv[i], "sleep") != NULL) {
+                    _pubRateMethodSpin = false;
+                    _timerDelay = false;
+                    printf("-burstDelay method: sleep.\n");
+                } else if (strstr(argv[i], "timer") != NULL) {
+                    _pubRateMethodSpin = false;
+                    _timerDelay = true;
+                    printf("-burstDelay method: timer.\n");
+                } else {
+                    fprintf(stderr,"<milliseconds>:<method> for burstDelay '%s' is not valid. It must contain 'spin', 'sleep' or 'timer'.\n",argv[i]);
+                    return false;
+                }
+            } else {
+                _burstDelay = (unsigned int) strtol(argv[i], NULL, 10);
+            }
+            if (_burstDelay < 1 || _burstDelay > 100000)
             {
                 fprintf(stderr, "burstDelay must be 1-10000ms\n");
                 return false;
             }
+            IsBurstMode = true;
         }
         else if (IS_OPTION(argv[i], "-burstSamples"))
         {
@@ -804,12 +827,13 @@ bool perftest_cpp::ParseConfig(int argc, char *argv[])
                 fprintf(stderr, "Missing <seconds> after -delay\n");
                 return false;
             }
-            burstSamples = (unsigned int) strtol(argv[i], NULL, 10);
-            if (burstSamples < 1 || burstSamples > 100)
+            _burstSamples = (unsigned int) strtol(argv[i], NULL, 10);
+            if (_burstSamples < 1 || _burstSamples > 100)
             {
                 fprintf(stderr, "burstSamples must be 1-100\n");
                 return false;
             }
+            IsBurstMode = true;
         }
         else
         {
@@ -1060,6 +1084,7 @@ class ThroughputListener : public IMessagingCB
 
         last_data_length = message.size;
         //printf("old pkt cnt=%llu, bytes_rcvd=%llu\n", packets_received, bytes_received);
+        throughput_seq_num = message.seq_num;
         ++packets_received;
         bytes_received += (unsigned long long) (message.size + perftest_cpp::OVERHEAD_BYTES);
         if (!_useCft) {
@@ -1246,7 +1271,8 @@ int perftest_cpp::Subscriber()
 
     while (true) {
         prev_time = now;
-        MilliSleep(975);
+        //MilliSleep(1000);
+        MicroSleep(999930);
         now = GetTimeUsec();
 
         if (reader_listener->change_size) { // ACK change_size
@@ -1285,7 +1311,6 @@ int perftest_cpp::Subscriber()
             prev_bytes = last_bytes;
             delta = now - prev_time;
             mps = (msgsent * 1000000 / delta);
-            //printf("msgsent=%llu, delta=%llu, mps=%llu\n", msgsent, delta, mps);
             bps = (bytes * 1000000 / delta);
 
             // calculations of overall average of mps and bps
@@ -1659,6 +1684,48 @@ static void *LatencyReadThread(void *arg)
     return NULL;
 }
 
+IMessagingWriter *writer = NULL;
+bool sentPing = false;
+
+void perftest_cpp::Wrapper_Write_data (int sign) {
+    TestMessage message;
+    unsigned long long now = GetTimeUsec();
+    message.timestamp_sec = (int)((now >> 32) & 0xFFFFFFFF);
+    message.timestamp_usec = (unsigned int)(now & 0xFFFFFFFF);
+    message.latency_ping = 0;
+
+    perftest_cpp* ptr2perftest_cpp = (perftest_cpp*) pt2Object;
+    ptr2perftest_cpp->Write_data(0, message);
+}
+
+void perftest_cpp::Write_data(int mode, TestMessage message) {
+    static unsigned long long iterLoop = 0;
+    static unsigned long long seq_num = 0;
+
+    // Set data size, account for other bytes in message
+    if (mode == 0) {
+        message.data = new char[(std::max)((int)_DataLen, (int)LENGTH_CHANGED_SIZE)];
+        message.size = (int)_DataLen - OVERHEAD_BYTES;
+    }
+
+    for (unsigned long i = 0; i < _burstSamples; i++) {
+        message.seq_num = seq_num++;
+        writer->Send(message);
+            if(_LatencyTest && sentPing) {
+                if (_IsReliable) {
+                    writer->waitForPingResponse();
+                }
+                else {
+                    /* time out in milliseconds */
+                    writer->waitForPingResponse(200);
+                }
+            }
+    }
+    iterLoop++;
+    if (iterLoop >= _NumIter)
+        _testCompleted = true;
+}
+
 /*********************************************************
  * Publisher
  */
@@ -1669,10 +1736,10 @@ int perftest_cpp::Publisher()
     IMessagingReader *announcement_reader;
     unsigned long num_latency;
     unsigned long initializeSampleCount = 50;
-    unsigned int        repaired_samples = 0;
 
     // create throughput/ping writer
-    IMessagingWriter *writer = _MessagingImpl->CreateWriter(_ThroughputTopicName);
+    //IMessagingWriter *writer = _MessagingImpl->CreateWriter(_ThroughputTopicName);
+    writer = _MessagingImpl->CreateWriter(_ThroughputTopicName);
     if (writer == NULL)
     {
         fprintf(stderr,"Problem creating throughput writer.\n");
@@ -1756,18 +1823,18 @@ int perftest_cpp::Publisher()
     unsigned long long spinPerUsec = 0;
     unsigned long sleepUsec = 1000;
     DDS_Duration_t sleep_period = {0,0};
-    DDS_Duration_t burst_sleep_period = DDS_Duration_t::from_millis(burstDelay);
 
-    // GRD - Get spin or sleep
+    if ( _pubRateMethodSpin) {
+        spinPerUsec = NDDSUtility::get_spin_per_microsecond();
+        /* A return value of 0 means accuracy not assured */
+        if (spinPerUsec == 0) {
+            fprintf(stderr,"Error initializing spin per microsecond. -pubRate cannot be used\n"
+                    "Exiting...\n");
+            return -1;
+        }
+    }
     if (_pubRate > 0) {
         if ( _pubRateMethodSpin) {
-            spinPerUsec = NDDSUtility::get_spin_per_microsecond();
-            /* A return value of 0 means accuracy not assured */
-            if (spinPerUsec == 0) {
-                fprintf(stderr,"Error initializing spin per microsecond. -pubRate cannot be used\n"
-                        "Exiting...\n");
-                return -1;
-            }
             _SpinLoopCount = 1000000*spinPerUsec/_pubRate;
         } else { // sleep count
             _SleepNanosec =(unsigned long) 1000000000/_pubRate;
@@ -1803,7 +1870,6 @@ int perftest_cpp::Publisher()
         initializeSampleCount = _InstanceCount;
     }
 
-    // GRD - What is INITIALIZE_SIZE and initializeSampleCount
     if (INITIALIZE_SIZE > MAX_PERFTEST_SAMPLE_SIZE) {
         fprintf(stderr,"Error: INITIALIZE_SIZE > MAX_PERFTEST_SAMPLE_SIZE\n");
         return -1;
@@ -1812,7 +1878,6 @@ int perftest_cpp::Publisher()
     message.size = INITIALIZE_SIZE;
     for (unsigned long i = 0; i < initializeSampleCount; i++) {
         // Send test initialization message
-        //printf("Send message with size=INITIALIZE_SIZE\n");
         writer->Send(message, true);
     }
     writer->Flush();
@@ -1828,7 +1893,6 @@ int perftest_cpp::Publisher()
     int pingID = -1;
     int current_index_in_batch = 0;
     int ping_index_in_batch = 0;
-    bool sentPing = false;
 
     unsigned long long time_now = 0, time_last_check = 0, time_delta = 0;
     unsigned long pubRate_sample_period = 1;
@@ -1849,27 +1913,30 @@ int perftest_cpp::Publisher()
     /********************
      *  Main sending loop
      */
-     if(IsBurstMode==true)
-        printf("burstMode = %d, delay=%lu ms, burstSamples=%lu, dataLen=%lu\n",
-                IsBurstMode, burstDelay, burstSamples, _DataLen);
-    unsigned long long tmp = 0;
-    /*
-    if (IsBurstMode == true)
-        tmp = _NumIter - 4;
-        */
-    for ( unsigned long long loop = tmp; ((_isScan) || (loop < _NumIter)) &&
+
+    /* If timer based then have timer callback execute the write */
+    if (_timerDelay == true) {
+        _NumIter = ((_executionTime*1000)/_burstDelay);
+        SetBurstDelayTimeout(_burstDelay);
+        while(!_testCompleted) {
+            sleep(1);
+        }
+        ClearBurstDelayTimer();
+    }
+
+    for ( unsigned long long loop = 0; ((_isScan) || (loop < _NumIter)) &&
                                      (!_testCompleted) ; ++loop ) {
         /* This if has been included to perform the control loop
            that modifies the publication rate according to -pubRate */
-        if (IsBurstMode == false) {
-            if ((_pubRate > 0) &&
-                    (loop > 0) &&
-                    (loop % pubRate_sample_period == 0)) {
+        if (((_pubRate > 0) || IsBurstMode) &&
+                (loop > 0) &&
+                (loop % pubRate_sample_period == 0)) {
 
-                time_now = perftest_cpp::GetTimeUsec();
+            time_now = perftest_cpp::GetTimeUsec();
+            time_delta = time_now - time_last_check;
+            time_last_check = time_now;
 
-                time_delta = time_now - time_last_check;
-                time_last_check = time_now;
+            if (IsBurstMode == false) {
                 rate = (pubRate_sample_period*1000000)/(unsigned long)time_delta;
                 if ( _pubRateMethodSpin) {
                     if (rate > (unsigned long)_pubRate) {
@@ -1889,26 +1956,36 @@ int perftest_cpp::Publisher()
                     }
                 }
             }
-
-            if ( _SpinLoopCount > 0 ) {
-                NDDSUtility::spin(_SpinLoopCount);
-            }
-
-            if ( _SleepNanosec > 0 ) {
-                sleep_period.nanosec = (DDS_UnsignedLong)_SleepNanosec;
-                NDDSUtility::sleep(sleep_period);
+            else {
+                if ( _pubRateMethodSpin) {
+                    if (_burstDelay*1000 > time_delta) {
+                        _SpinLoopCount = ((_burstDelay*1000 - time_delta) * spinPerUsec);
+                    }
+                    else
+                        _SpinLoopCount = 0;
+                }
+                else {
+                    if (_burstDelay*1000 > time_delta)
+                        _SleepNanosec = ((_burstDelay*1000) - time_delta) * 1000;
+                    else
+                        _SleepNanosec = 0;
+                }
             }
         }
-        else {
+        if ( _SpinLoopCount > 0 ) {
+            NDDSUtility::spin(_SpinLoopCount);
         }
 
+        if ( _SleepNanosec > 0 ) {
+            sleep_period.nanosec = (DDS_UnsignedLong)_SleepNanosec;
+            NDDSUtility::sleep(sleep_period);
+        }
         pingID = -1;
 
         // only send latency pings if is publisher with ID 0
         // In batch mode, latency pings are sent once every LatencyCount batches
         if ( (_PubID == 0) && (((loop/_SamplesPerBatch) % (unsigned long long)_LatencyCount) == 0) )
         {
-
             /* In batch mode only send a single ping in a batch.
              *
              * However, the ping is sent in a round robin position within
@@ -1981,32 +2058,8 @@ int perftest_cpp::Publisher()
         current_index_in_batch = (current_index_in_batch + 1) % _SamplesPerBatch;
 
         if (IsBurstMode == false) {
-            burstSamples = 1;
-        }
-        // Set data size, account for other bytes in message
-        message.size = (int)_DataLen - OVERHEAD_BYTES;
-        for (unsigned long i = 0; i < burstSamples; i++) {
-            message.seq_num = (unsigned long) loop;
-            message.latency_ping = pingID;
-            // GRD - This is where we are sending message
-            //printf("Send msg size=%d - main\n", message.size);
-            writer->Send(message);
-            if(_LatencyTest && sentPing) {
-                if (_IsReliable) {
-                    writer->waitForPingResponse();
-                }
-                else {
-                    /* time out in milliseconds */
-                    writer->waitForPingResponse(200);
-                }
-            }
-        }
-        repaired_samples = writer->getPulledSampleCount();
-
-        if (IsBurstMode == true) {
-            //sleep_period.sec = (DDS_UnsignedLong)burstDelay;
-            NDDSUtility::sleep(burst_sleep_period);
-        }
+            _burstSamples = 1;
+        }        Write_data(1, message);
 
         // come to the beginning of another batch
         if (current_index_in_batch == 0)
@@ -2109,6 +2162,30 @@ inline void perftest_cpp::SetTimeout(unsigned int executionTimeInSeconds,
     }
 }
 
+inline void perftest_cpp::SetBurstDelayTimeout(unsigned int delay) {
+        fprintf(stderr,"Setting burstDelay timeout to %u seconds\n", delay);
+      #ifdef RTI_WIN32
+        CreateTimerQueueTimer(&_hTimer, _hTimerQueue, (WAITORTIMERCALLBACK)Wrapper_Write_data(),
+                NULL , burstDelay, 0, 0);
+      #else
+        struct itimerval tval;
+        signal(SIGALRM, Wrapper_Write_data);
+        tval.it_value.tv_sec = 0;
+        tval.it_value.tv_usec = delay*1000;
+        tval.it_interval = tval.it_value;
+        (void) setitimer(ITIMER_REAL, & tval, NULL);
+        //alarm(burstDelay);
+      #endif
+}
+
+inline void perftest_cpp::ClearBurstDelayTimer() {
+        struct itimerval tval;
+        tval.it_value.tv_sec = 0;
+        tval.it_value.tv_usec = 0;
+        tval.it_interval = tval.it_value;
+        (void) setitimer(ITIMER_REAL, &tval, NULL);
+}
+
 inline unsigned long long perftest_cpp::GetTimeUsec() {
     perftest_cpp::_Clock->getTime(
             perftest_cpp::_Clock,
@@ -2133,6 +2210,10 @@ inline VOID CALLBACK perftest_cpp::Timeout_scan(PVOID lpParam, BOOLEAN timerOrWa
     _testCompleted_scan = true;
 }
 
+inline VOID CALLBACK perftest_cpp::Wrapper_Write_data(PVOID lpParam, BOOLEAN timerOrWaitFired) {
+    /* This is to avoid the warning of non using lpParam */
+}
+
   #pragma warning(pop)
 #else
 inline void perftest_cpp::Timeout(int sign) {
@@ -2142,4 +2223,9 @@ inline void perftest_cpp::Timeout(int sign) {
 inline void perftest_cpp::Timeout_scan(int sign) {
     _testCompleted_scan = true;
 }
+
+unsigned long perftest_cpp::get_DataLen() {
+    return perftest_cpp::_DataLen;
+}
+
 #endif

@@ -62,6 +62,15 @@ class perftest_cpp
       #endif
     }
 
+    static void MicroSleep(unsigned int microsec) {
+      #if defined(RTI_WIN32)
+        printf("Error: No microsec exists\n");
+      #elif defined(RTI_VXWORKS)
+        printf("Error: No microsec exists\n");
+      #else
+        usleep(microsec);
+      #endif
+    }
     static void ThreadYield() {
   #ifdef RTI_WIN32
         Sleep(0);
@@ -94,16 +103,19 @@ class perftest_cpp
     bool  IsMonitor;
     int _pubRate;
     bool _pubRateMethodSpin;
+    bool _timerDelay;
     bool _isKeyed;
     unsigned long _useUnbounded;
     unsigned int _executionTime;
-    unsigned long  burstDelay;
-    unsigned long  burstSamples;
+    unsigned long  _burstDelay;
+    unsigned long  _burstSamples;
     bool _displayWriterStats;
     bool _useCft;
 
   private:
     static void SetTimeout(unsigned int executionTimeInSeconds, bool _isScan = false);
+    static void SetBurstDelayTimeout(unsigned int delay);
+    static void ClearBurstDelayTimer();
 
     /* The following three members are used in a static callback
        and so they have to be static */
@@ -144,13 +156,18 @@ class perftest_cpp
 
    public:
     static unsigned long long GetTimeUsec();
+    unsigned long get_DataLen();
 
   #ifdef RTI_WIN32
     static VOID CALLBACK Timeout(PVOID lpParam, BOOLEAN timerOrWaitFired);
     static VOID CALLBACK Timeout_scan(PVOID lpParam, BOOLEAN timerOrWaitFired);
+    static VOID CALLBACK Wrapper_Write_data(PVOID lpParam, BOOLEAN timerOrWaitFired);
+    void Write_data(PVOID lpParam, BOOLEAN timerOrWaitFired);
   #else
     static void Timeout(int sign);
     static void Timeout_scan(int sign);
+    static void Wrapper_Write_data(int sign);
+    void Write_data(int mode, TestMessage message);
   #endif
 
 };
